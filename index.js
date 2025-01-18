@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const port = process.env.PORT || 5000;
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
 const app = express();
@@ -28,6 +29,7 @@ async function run() {
     const menuCollection = client.db('bistroDB').collection('menu');
     const reviewsCollection = client.db('bistroDB').collection('reviews');
     const cartCollection = client.db('bistroDB').collection('cart');
+    const paymentCollection = client.db('bistroDB').collection('payment');
 
     // jwt related api
 
@@ -39,7 +41,7 @@ async function run() {
 
     // middlewares
     const verifyToken = (req, res, next) => {
-      console.log('inside verify', req.headers.authorization);
+      // console.log('inside verify', req.headers.authorization);
       if (!req.headers.authorization) {
         return res.status(401).send({ message: 'forbidden access' });
       }
@@ -76,7 +78,7 @@ async function run() {
       res.send(result);
     });
 
-    app.get('/user/admin/:email', verifyToken, verifyAdmin, async (req, res) => {
+    app.get('/user/admin/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
       if (email !== req.decoded.email) {
         return res.status(403).send({ message: 'unauthorize access' })
@@ -141,7 +143,7 @@ async function run() {
 
     app.post('/menu', async (req, res) => {
       const item = req.body;
-      console.log(item)
+
       const result = await menuCollection.insertOne(item);
       res.send(result);
     })
@@ -171,7 +173,7 @@ async function run() {
 
         }
       }
-      const result  = await menuCollection.updateOne(filter, updatedDoc);
+      const result = await menuCollection.updateOne(filter, updatedDoc);
       res.send(result);
     })
 
@@ -214,6 +216,80 @@ async function run() {
       const query = { _id: new ObjectId(id) };
       const result = await cartCollection.deleteOne(query);
       res.send(result);
+    });
+    // payment api
+    app.post('/create-payment-intent', async (req, res) => {
+      const { price } = req.body;
+      const amount = parseInt(price * 100);
+
+      console.log(amount, 'amount inside the intent')
+
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: 'usd',
+        payment_method_types: ['card']
+
+      })
+
+      res.send({
+        clientSecret: paymentIntent.client_secret,
+      });
+    })
+
+    app.get('/payments/:email', verifyToken, async (req, res) => {
+      const email = req.params.email;
+      const query = { email: email };
+      if (email != req.decoded.email) {
+        return res.status(403).send({ message: 'forbidden access' })
+      }
+      const result = await paymentCollection.find(query).toArray();
+      res.send(result)
+    })
+
+    app.post('/payments', async (req, res) => {
+      const payment = req.body;
+      const paymentResult = await paymentCollection.insertOne(payment);
+
+      // Carefully delete each item from the cart
+      console.log('payment info', payment);
+      const query = {
+        _id: {
+          $in: payment.cartIds.map(id => new ObjectId(id))
+        }
+      };
+      const deleteResult = await cartCollection.deleteMany(query);
+      res.send({ paymentResult, deleteResult });
+    })
+
+    // stats or analytics
+    app.get('/admin-stats',verifyToken, verifyAdmin, async (req, res) => {
+      const users = await userCollecction.estimatedDocumentCount();
+      const menuItems = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentCollection.estimatedDocumentCount();
+
+      // this is not the best way
+      // const payments = await paymentCollection.find().toArray();
+      // const revenue = payments.reduce((total, payment) => total + payment.price, 0)
+
+    const result = await paymentCollection.aggregate([
+      {
+        $group: {
+          _id : null,
+          totalRevenue: {
+            $sum: '$price'
+          }
+        }
+      }
+    ]).toArray();
+    const revenue = result.length>0?result[0].totalRevenue:0; 
+
+
+      res.send({
+        users,
+        menuItems,
+        orders,
+        revenue
+      })
     })
 
 
